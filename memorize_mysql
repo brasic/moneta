@@ -2,15 +2,35 @@
 # frozen_string_literal: true
 
 require "fileutils"
+require "open3"
 
 module MemorizeMysql
+  module_function
+
   WD = "/var/lib"
   MYSQL = "/var/lib/mysql"
+  MTAB = "/etc/mtab"
+
+
+  def in_memory?
+    File.readlines(MTAB).any? { |line| line.include?(MYSQL) }
+  end
+
+  def current_gtid
+    mysql("select @@global.gtid_executed")
+  end
+
+  def current_boot_id
+    File.read("/proc/sys/kernel/random/boot_id").chomp
+  end
+
+  def ensure_in_memory
+    return if in_memory?
+    backup
+  end
 
   def self.call
-    if File.readlines("/etc/mtab").any? { |line| line.include?("/var/lib/mysql") }
-      die "already in memory"
-    end
+    ensure_in_memory
 
     if Process.euid != 0
       exec("sudo #{$PROGRAM_NAME}")
@@ -46,12 +66,20 @@ module MemorizeMysql
     system(cmd, exception: true)
   end
 
+  def mysql(sql)
+    out, err, status = Open3.capture3("mysql", "-uroot", "--skip-column-names", "-e", sql)
+    raise "mysql #{sql.inspect} failed: #{err}" unless status.success?
+    out.chomp
+  end
+
   def self.die(msg)
     puts msg
     exit 1
   end
 end
 
-if __FILE__ == $PROGRAM_NAME
-  MemorizeMysql.call
-end
+#if __FILE__ == $PROGRAM_NAME
+#  MemorizeMysql.call
+#end
+require 'pry'
+binding.pry
