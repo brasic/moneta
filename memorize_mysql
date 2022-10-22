@@ -1,0 +1,57 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "fileutils"
+
+module MemorizeMysql
+  WD = "/var/lib"
+  MYSQL = "/var/lib/mysql"
+
+  def self.call
+    if File.readlines("/etc/mtab").any? { |line| line.include?("/var/lib/mysql") }
+      die "already in memory"
+    end
+
+    if Process.euid != 0
+      exec("sudo #{$PROGRAM_NAME}")
+    end
+
+    Dir.chdir(WD)
+
+    run "supervisorctl stop mysql"
+    tarball = nil
+
+    if !Dir.empty?(MYSQL)
+      tarball = "mysql-#{Time.now.to_i}.tar.xz"
+      puts "mysql dir is nonempty, archiving it to #{tarball}"
+      run "tar cJf #{tarball} #{MYSQL}"
+      run "rm -r #{MYSQL}/*"
+    end
+
+    tarball ||= Dir['/var/lib/mysql*.tar.xz'].max_by { |x| File.mtime(x) }
+
+    if !tarball
+      die "could not find tarball to reinflate"
+    end
+
+    run "mount -t tmpfs -o size=5G tmpfs #{MYSQL}"
+    run "tar xf #{tarball}"
+    FileUtils.chown_R "mysql", "mysql", MYSQL
+    FileUtils.chmod 0700,  MYSQL
+    run("supervisorctl start mysql")
+  end
+
+  def self.run(cmd)
+    puts "-> #{cmd}"
+    system(cmd, exception: true)
+  end
+
+  def self.die(msg)
+    puts msg
+    exit 1
+  end
+end
+
+if __FILE__ == $PROGRAM_NAME
+  MemorizeMysql.call
+end
