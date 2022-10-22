@@ -1,85 +1,114 @@
+# typed: strict
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
 require "fileutils"
 require "open3"
 
+# Utilities for working with a mysql server instance inside a ramdisk
 module MemorizeMysql
   module_function
+
+  extend T::Sig
+  include Kernel
 
   WD = "/var/lib"
   MYSQL = "/var/lib/mysql"
   MTAB = "/etc/mtab"
 
-
+  sig { returns(T::Boolean) }
   def in_memory?
     File.readlines(MTAB).any? { |line| line.include?(MYSQL) }
   end
 
+  sig { returns(String) }
   def current_gtid
     mysql("select @@global.gtid_executed")
   end
 
+  sig { returns(String) }
   def current_boot_id
     File.read("/proc/sys/kernel/random/boot_id").chomp
   end
 
+  sig { void }
   def ensure_in_memory
     return if in_memory?
     backup
   end
 
-  def self.call
+  sig { returns(String) }
+  def backup_file_name
+    File.join(WD, "#{current_boot_id}-#{current_gtid}.sql.zst")
+  end
+
+  sig { void }
+  def backup
+    fname = backup_file_name
+    return if File.exist?(fname)
+    Open3.pipeline_r(
+      %w[mysqldump -uroot --all-databases --triggers --routines --events],
+      %w[zstd --ultra -22]
+    ) do |stdout, wait_threads|
+      File.open(fname, "wb") do |sink|
+        IO.copy_stream(stdout, sink)
+        stdout.close
+      end
+      raise "failed to backup" if wait_threads.any? { |waiter| !waiter.value.success? }
+    end
+  end
+
+  sig { void }
+  def call
     ensure_in_memory
 
-    if Process.euid != 0
-      exec("sudo #{$PROGRAM_NAME}")
-    end
+    re_exec_as_root if Process.euid != 0
 
     Dir.chdir(WD)
 
     run "supervisorctl stop mysql"
     tarball = nil
 
-    if !Dir.empty?(MYSQL)
+    unless Dir.empty?(MYSQL)
       tarball = "mysql-#{Time.now.to_i}.tar.xz"
       puts "mysql dir is nonempty, archiving it to #{tarball}"
       run "tar cJf #{tarball} #{MYSQL}"
       run "rm -r #{MYSQL}/*"
     end
 
-    tarball ||= Dir['/var/lib/mysql*.tar.xz'].max_by { |x| File.mtime(x) }
+    tarball ||= Dir["/var/lib/mysql*.tar.xz"].max_by { |x| File.mtime(x) }
 
-    if !tarball
-      die "could not find tarball to reinflate"
-    end
+    die "could not find tarball to reinflate" unless tarball
 
     run "mount -t tmpfs -o size=5G tmpfs #{MYSQL}"
     run "tar xf #{tarball}"
     FileUtils.chown_R "mysql", "mysql", MYSQL
-    FileUtils.chmod 0700,  MYSQL
+    FileUtils.chmod 0o700, MYSQL
     run("supervisorctl start mysql")
   end
 
-  def self.run(cmd)
+  sig { params(cmd: String).void }
+  def run(cmd)
     puts "-> #{cmd}"
     system(cmd, exception: true)
   end
 
+  sig { void }
+  def re_exec_as_root
+    Kernel.exec("sudo #{$PROGRAM_NAME}")
+  end
+
+  sig { params(sql: T.untyped).returns(String) }
   def mysql(sql)
-    out, err, status = Open3.capture3("mysql", "-uroot", "--skip-column-names", "-e", sql)
+    out, err, status =
+      Open3.capture3("mysql", "-uroot", "--skip-column-names", "-e", sql)
     raise "mysql #{sql.inspect} failed: #{err}" unless status.success?
     out.chomp
   end
 
-  def self.die(msg)
+  sig { params(msg: String).void }
+  def die(msg)
     puts msg
     exit 1
   end
 end
-
-#if __FILE__ == $PROGRAM_NAME
-#  MemorizeMysql.call
-#end
-require 'pry'
-binding.pry
