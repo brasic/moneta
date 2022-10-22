@@ -2,6 +2,8 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
+# vim: set filetype=ruby :
+
 require "fileutils"
 require "open3"
 
