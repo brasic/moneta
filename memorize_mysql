@@ -1,5 +1,5 @@
-# typed: strict
 #!/usr/bin/env ruby
+# typed: true
 # frozen_string_literal: true
 
 # vim: set filetype=ruby :
@@ -11,48 +11,43 @@ require "open3"
 module MemorizeMysql
   module_function
 
-  extend T::Sig
   include Kernel
 
   WD = "/var/lib"
   MYSQL = "/var/lib/mysql"
   MTAB = "/etc/mtab"
 
-  sig { returns(T::Boolean) }
   def in_memory?
     File.readlines(MTAB).any? { |line| line.include?(MYSQL) }
   end
 
-  sig { returns(String) }
   def current_gtid
     mysql("select @@global.gtid_executed")
   end
 
-  sig { returns(String) }
   def current_boot_id
     File.read("/proc/sys/kernel/random/boot_id").chomp
   end
 
-  sig { void }
   def ensure_in_memory
     return if in_memory?
     backup
   end
 
-  sig { returns(String) }
   def backup_file_name
-    File.join(WD, "#{current_boot_id}-#{current_gtid}.sql.zst")
+    #File.join(WD, "#{current_boot_id}-#{current_gtid}.sql.zst")
+
+    File.join(WD, "mysql.sql.zst")
   end
 
-  sig { void }
   def backup
-    fname = backup_file_name
-    return if File.exist?(fname)
+    gtid = current_gtid
+    return if File.exist?(backup_file_name)
     Open3.pipeline_r(
       %w[mysqldump -uroot --all-databases --triggers --routines --events],
       %w[zstd --ultra -22]
     ) do |stdout, wait_threads|
-      File.open(fname, "wb") do |sink|
+      File.open(backup_file_name, "wb") do |sink|
         IO.copy_stream(stdout, sink)
         stdout.close
       end
@@ -60,7 +55,6 @@ module MemorizeMysql
     end
   end
 
-  sig { void }
   def call
     ensure_in_memory
 
@@ -89,18 +83,15 @@ module MemorizeMysql
     run("supervisorctl start mysql")
   end
 
-  sig { params(cmd: String).void }
   def run(cmd)
     puts "-> #{cmd}"
     system(cmd, exception: true)
   end
 
-  sig { void }
   def re_exec_as_root
     Kernel.exec("sudo #{$PROGRAM_NAME}")
   end
 
-  sig { params(sql: T.untyped).returns(String) }
   def mysql(sql)
     out, err, status =
       Open3.capture3("mysql", "-uroot", "--skip-column-names", "-e", sql)
@@ -108,7 +99,6 @@ module MemorizeMysql
     out.chomp
   end
 
-  sig { params(msg: String).void }
   def die(msg)
     puts msg
     exit 1
