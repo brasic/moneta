@@ -6,6 +6,7 @@
 
 require "fileutils"
 require "open3"
+require "ffi-xattr"
 
 # Utilities for working with a mysql server instance inside a ramdisk
 module MemorizeMysql
@@ -16,6 +17,8 @@ module MemorizeMysql
   WD = "/var/lib"
   MYSQL = "/var/lib/mysql"
   MTAB = "/etc/mtab"
+  BOOT_ID_ATTR = "user.boot_id"
+  GTID_ATTR = "user.gtid_executed"
 
   def in_memory?
     File.readlines(MTAB).any? { |line| line.include?(MYSQL) }
@@ -35,14 +38,30 @@ module MemorizeMysql
   end
 
   def backup_file_name
-    #File.join(WD, "#{current_boot_id}-#{current_gtid}.sql.zst")
-
     File.join(WD, "mysql.sql.zst")
+  end
+
+  def backup_attrs
+    Xattr.new(backup_file_name)
+  end
+
+  def backup_current?
+    return false unless File.exist?(backup_file_name)
+    unless backup_attrs.get(BOOT_ID_ATTR) == current_boot_id
+      puts "Backup is from a different boot"
+      return false
+    end
+    unless backup_attrs.get(GTID_ATTR) == current_gtid
+      puts "mysql server has moved on since backup"
+      return false
+    end
+    puts "backup is current"
+    true
   end
 
   def backup
     gtid = current_gtid
-    return if File.exist?(backup_file_name)
+    puts "backup at #{backup_file_name} exists, overwriting file" if File.exist?(backup_file_name)
     Open3.pipeline_r(
       %w[mysqldump -uroot --all-databases --triggers --routines --events],
       %w[zstd --ultra -22]
@@ -53,6 +72,9 @@ module MemorizeMysql
       end
       raise "failed to backup" if wait_threads.any? { |waiter| !waiter.value.success? }
     end
+    puts "dump complete. writing attrs: gtid=#{gtid} boot_id=#{current_boot_id}"
+    backup_attrs.set("user.gtid", gtid)
+    backup_attrs.set("user.boot_id", current_boot_id)
   end
 
   def call
@@ -104,3 +126,6 @@ module MemorizeMysql
     exit 1
   end
 end
+
+require "pry"
+binding.pry
