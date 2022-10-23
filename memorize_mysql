@@ -88,7 +88,7 @@ module Backup
   end
 
   def write(gtid:)
-    File.open(Backup.path, "wb") do |io|
+    File.open(path, "wb") do |io|
       yield io
     end
     set_attrs(gtid:)
