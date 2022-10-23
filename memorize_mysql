@@ -208,8 +208,7 @@ module Moneta
 end
 
 if $PROGRAM_NAME == __FILE__
-  verb = ARGV.shift
-  case verb
+  case ARGV[0]
     when "boot"
       Moneta.boot
     when "backup"
@@ -217,6 +216,13 @@ if $PROGRAM_NAME == __FILE__
     when "memorize"
       Moneta.memorize
     else
-      puts "usage: #{$PROGRAM_NAME} [boot|backup|memorize]"
+      puts(<<~USAGE)
+        usage: #{$PROGRAM_NAME} <command>
+
+        commands:
+          boot - bring a freshly booted server online by mounting a ramdisk and restoring from backup
+          backup - backup the ramdisk'd mysql if needed (intended for pre-shutdown or periodic)
+          memorize - put an existing mysql instance into a ramdisk
+      USAGE
     end
 end
