@@ -1,5 +1,4 @@
 #!/usr/bin/env ruby
-# typed: true
 # frozen_string_literal: true
 
 # vim: set filetype=ruby :
@@ -7,125 +6,217 @@
 require "fileutils"
 require "open3"
 require "ffi-xattr"
+require "base64"
+require "digest"
 
-# Utilities for working with a mysql server instance inside a ramdisk
-module MemorizeMysql
-  module_function
+MYSQL = "/var/lib/mysql"
+MTAB = "/etc/mtab"
+WD = "/var/lib"
+BOOT_ID_ATTR = "user.boot_id"
+GTID_ATTR = "user.gtid"
 
-  include Kernel
 
-  WD = "/var/lib"
-  MYSQL = "/var/lib/mysql"
-  MTAB = "/etc/mtab"
-  BOOT_ID_ATTR = "user.boot_id"
-  GTID_ATTR = "user.gtid_executed"
-
-  def in_memory?
-    File.readlines(MTAB).any? { |line| line.include?(MYSQL) }
-  end
-
-  def current_gtid
-    mysql("select @@global.gtid_executed")
-  end
-
-  def current_boot_id
-    File.read("/proc/sys/kernel/random/boot_id").chomp
-  end
-
-  def ensure_in_memory
-    return if in_memory?
-    backup
-  end
-
-  def backup_file_name
-    File.join(WD, "mysql.sql.zst")
-  end
-
-  def backup_attrs
-    Xattr.new(backup_file_name)
-  end
-
-  def backup_current?
-    return false unless File.exist?(backup_file_name)
-    unless backup_attrs.get(BOOT_ID_ATTR) == current_boot_id
-      puts "Backup is from a different boot"
-      return false
-    end
-    unless backup_attrs.get(GTID_ATTR) == current_gtid
-      puts "mysql server has moved on since backup"
-      return false
-    end
-    puts "backup is current"
-    true
-  end
-
-  def backup
-    gtid = current_gtid
-    puts "backup at #{backup_file_name} exists, overwriting file" if File.exist?(backup_file_name)
-    Open3.pipeline_r(
-      %w[mysqldump -uroot --all-databases --triggers --routines --events],
-      %w[zstd --ultra -22]
-    ) do |stdout, wait_threads|
-      File.open(backup_file_name, "wb") do |sink|
-        IO.copy_stream(stdout, sink)
-        stdout.close
-      end
-      raise "failed to backup" if wait_threads.any? { |waiter| !waiter.value.success? }
-    end
-    puts "dump complete. writing attrs: gtid=#{gtid} boot_id=#{current_boot_id}"
-    backup_attrs.set("user.gtid", gtid)
-    backup_attrs.set("user.boot_id", current_boot_id)
-  end
-
-  def call
-    ensure_in_memory
-
-    re_exec_as_root if Process.euid != 0
-
-    Dir.chdir(WD)
-
-    run "supervisorctl stop mysql"
-    tarball = nil
-
-    unless Dir.empty?(MYSQL)
-      tarball = "mysql-#{Time.now.to_i}.tar.xz"
-      puts "mysql dir is nonempty, archiving it to #{tarball}"
-      run "tar cJf #{tarball} #{MYSQL}"
-      run "rm -r #{MYSQL}/*"
-    end
-
-    tarball ||= Dir["/var/lib/mysql*.tar.xz"].max_by { |x| File.mtime(x) }
-
-    die "could not find tarball to reinflate" unless tarball
-
-    run "mount -t tmpfs -o size=5G tmpfs #{MYSQL}"
-    run "tar xf #{tarball}"
-    FileUtils.chown_R "mysql", "mysql", MYSQL
-    FileUtils.chmod 0o700, MYSQL
-    run("supervisorctl start mysql")
+module Sudo
+  def sudo(cmd)
+    run "sudo #{cmd}"
   end
 
   def run(cmd)
     puts "-> #{cmd}"
     system(cmd, exception: true)
   end
+end
 
-  def re_exec_as_root
-    Kernel.exec("sudo #{$PROGRAM_NAME}")
+# Supervisord wrapper
+class Supervisor
+  include Sudo
+  def initialize(name)
+    @name = name
   end
 
-  def mysql(sql)
+  def running?
+    sudo("supervisorctl status #{@name}")
+  end
+
+  def start
+    sudo("supervisorctl start #{@name}")
+  end
+
+  def stop
+    sudo("supervisorctl stop #{@name}")
+  end
+end
+
+def supervised_as(name)
+  mod = Module.new do
+    define_method(:supervisor) do
+      @supervisor ||= Supervisor.new(name)
+    end
+
+    def running?
+      supervisor.running?
+    end
+
+    def start
+      supervisor.start
+    end
+
+    def stop
+      supervisor.stop
+    end
+  end
+  extend mod
+end
+
+module Backup
+  module_function
+
+  def path
+    File.join(WD, "mysql.sql.zst")
+  end
+
+  def exist?
+    File.exist?(path)
+  end
+
+  def current?
+    (
+      exist? &&
+      attrs.get(BOOT_ID_ATTR) == current_boot_id &&
+      attrs.get(GTID_ATTR) == Mysql.current_gtid
+    )
+  end
+
+  def write(gtid:)
+    File.open(Backup.path, "wb") do |io|
+      yield io
+    end
+    set_attrs(gtid:)
+  end
+
+  def attrs
+    Xattr.new(path)
+  end
+
+  def set_attrs(gtid:)
+    attrs.set(GTID_ATTR, gtid)
+    attrs.set(BOOT_ID_ATTR, current_boot_id)
+  end
+
+  def current_boot_id
+    File.read("/proc/sys/kernel/random/boot_id").chomp
+  end
+end
+
+# Routines to interact with mysqld
+module Mysql
+  module_function
+  extend Sudo
+  supervised_as "mysql"
+
+  def current_gtid
+    Base64.urlsafe_encode64(
+      Digest::SHA2.digest(
+        sql("select @@global.gtid_executed")
+      )
+    )
+  end
+
+  def initialize_datadir
+    raise "cannot initialize on running instance" if running?
+    sudo "mysqld --initialize-insecure"
+    sudo "chown -R mysql:mysql #{MYSQL}"
+  end
+
+  def backup
+    Backup.write(gtid: current_gtid) do |backup|
+      dump(to: backup)
+    end
+  end
+
+  def restore
+    Open3.pipeline(
+      %w[unzstd],
+      %w[mysql -uroot],
+      in: Backup.path
+    )
+  end
+
+  def dump(to:)
+    Open3.pipeline_r(
+      %w[mysqldump -uroot --all-databases --triggers --routines --events],
+      "zstd"
+    ) do |from, wait_threads|
+      IO.copy_stream(from, to)
+      from.close
+      raise "failed to backup" if wait_threads.any? { |waiter| !waiter.value.success? }
+    end
+  end
+
+  def sql(sql)
     out, err, status =
       Open3.capture3("mysql", "-uroot", "--skip-column-names", "-e", sql)
     raise "mysql #{sql.inspect} failed: #{err}" unless status.success?
     out.chomp
   end
+end
 
-  def die(msg)
-    puts msg
-    exit 1
+module Ramdisk
+  extend Sudo
+  module_function
+
+  def mounted?
+    File.readlines(MTAB).any? { |line| line.include?(MYSQL) }
+  end
+
+  def mount
+    return if mounted?
+    sudo "mount -t tmpfs -o size=5G tmpfs #{MYSQL}"
+  end
+
+  def prep_dir
+    FileUtils.mkdir_p(MYSQL)
+    sudo "rm -r #{MYSQL} && mkdir #{MYSQL}"
   end
 end
 
-require "pry"
-binding.pry
+# Utilities for working with a mysql server instance inside a ramdisk
+module MemorizeMysql
+  module_function
+
+  # Run on server start to bring things to the way they were pre-shutdown
+  def boot
+    Ramdisk.mount
+    Mysql.initialize_datadir
+    Mysql.start
+    Backup.exist? ? Mysql.restore : puts("no backup found, your server is empty")
+  end
+
+  def periodic_backup
+    Mysql.backup unless Backup.current?
+  end
+
+  # put an existing mysql instance into a ramdisk
+  def memorize
+    raise "already ramdisk'd" if Ramdisk.mounted?
+    raise "want running mysqld" unless Mysql.running?
+    Mysql.backup
+    Mysql.stop
+    Ramdisk.prep_dir
+    boot
+  end
+end
+
+if $PROGRAM_NAME == __FILE__
+  verb = ARGV.shift
+  case verb
+    when "boot"
+      MemorizeMysql.boot
+    when "backup"
+      MemorizeMysql.periodic_backup
+    when "memorize"
+      MemorizeMysql.memorize
+    else
+      puts "usage: #{$PROGRAM_NAME} [boot|backup|memorize]"
+    end
+end
