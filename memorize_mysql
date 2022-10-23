@@ -181,7 +181,7 @@ module Ramdisk
 end
 
 # Utilities for working with a mysql server instance inside a ramdisk
-module MemorizeMysql
+module Moneta
   module_function
 
   # Run on server start to bring things to the way they were pre-shutdown
@@ -211,11 +211,11 @@ if $PROGRAM_NAME == __FILE__
   verb = ARGV.shift
   case verb
     when "boot"
-      MemorizeMysql.boot
+      Moneta.boot
     when "backup"
-      MemorizeMysql.periodic_backup
+      Moneta.periodic_backup
     when "memorize"
-      MemorizeMysql.memorize
+      Moneta.memorize
     else
       puts "usage: #{$PROGRAM_NAME} [boot|backup|memorize]"
     end
