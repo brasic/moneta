@@ -127,7 +127,7 @@ module Mysql
 
   def initialize_datadir
     raise "cannot initialize on running instance" if running?
-    sudo "mysqld --initialize-insecure"
+    sudo "sh -c 'sudo -u mysql mysqld --initialize-insecure'"
     sudo "chown -R mysql:mysql #{MYSQL}"
   end
 
@@ -225,6 +225,7 @@ if $PROGRAM_NAME == __FILE__
         commands:
           boot - bring a freshly booted server online by mounting a ramdisk and restoring from backup
           backup - backup the ramdisk'd mysql if needed (intended for pre-shutdown or periodic)
+                   No backup will be made if the current backup is fresh according to the gtid.
           memorize - put an existing mysql instance into a ramdisk
       USAGE
     end
