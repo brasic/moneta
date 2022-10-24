@@ -15,15 +15,10 @@ WD = "/var/lib"
 BOOT_ID_ATTR = "user.boot_id"
 GTID_ATTR = "user.gtid"
 
-
 module Sudo
-  def sudo(cmd)
-    run "sudo #{cmd}"
-  end
-
-  def run(cmd)
-    puts "-> #{cmd}"
-    system(cmd, exception: true)
+  def sudo(cmd, exception: true)
+    puts "(sudo) -> #{cmd}"
+    system("sudo #{cmd}", exception:)
   end
 end
 
@@ -35,7 +30,7 @@ class Supervisor
   end
 
   def running?
-    sudo("supervisorctl status #{@name}")
+    sudo("supervisorctl status #{@name}", exception: false)
   end
 
   def start
@@ -70,6 +65,7 @@ end
 
 module Backup
   extend Sudo
+
   module_function
 
   def path
@@ -88,12 +84,10 @@ module Backup
     )
   end
 
-  def write(gtid:)
+  def write(gtid:, &block)
     sudo("touch #{path}")
     sudo("chmod 666 #{path}")
-    File.open(path, "wb") do |io|
-      yield io
-    end
+    File.open(path, "wb", &block)
     set_attrs(gtid:)
   end
 
@@ -114,6 +108,7 @@ end
 # Routines to interact with mysqld
 module Mysql
   module_function
+
   extend Sudo
   supervised_as "mysql"
 
@@ -138,6 +133,7 @@ module Mysql
   end
 
   def restore
+    puts(Backup.exist? ? "Restoring from #{Backup.path}" : "No backup found, your server will be empty")
     Open3.pipeline(
       %w[unzstd],
       %w[mysql -uroot],
@@ -166,6 +162,7 @@ end
 
 module Ramdisk
   extend Sudo
+
   module_function
 
   def mounted?
@@ -192,7 +189,7 @@ module Moneta
     Ramdisk.mount
     Mysql.initialize_datadir
     Mysql.start
-    Backup.exist? ? Mysql.restore : puts("no backup found, your server is empty")
+    Mysql.restore
   end
 
   def periodic_backup
@@ -212,21 +209,24 @@ end
 
 if $PROGRAM_NAME == __FILE__
   case ARGV[0]
-    when "boot"
-      Moneta.boot
-    when "backup"
-      Moneta.periodic_backup
-    when "memorize"
-      Moneta.memorize
-    else
-      puts(<<~USAGE)
-        usage: #{$PROGRAM_NAME} <command>
+  when "boot"
+    Moneta.boot
+  when "backup"
+    Moneta.periodic_backup
+  when "memorize"
+    Moneta.memorize
+  else
+    puts(<<~USAGE)
+      usage: #{$PROGRAM_NAME} <command>
 
-        commands:
-          boot - bring a freshly booted server online by mounting a ramdisk and restoring from backup
-          backup - backup the ramdisk'd mysql if needed (intended for pre-shutdown or periodic)
-                   No backup will be made if the current backup is fresh according to the gtid.
-          memorize - put an existing mysql instance into a ramdisk
-      USAGE
-    end
+      commands:
+        boot - bring a freshly booted server online by mounting a ramdisk and restoring from backup
+        backup - backup the ramdisk'd mysql if needed (intended for pre-shutdown or periodic)
+                 No backup will be made if the current backup is fresh according to the gtid.
+        memorize - put an existing mysql instance into a ramdisk
+    USAGE
+  end
 end
+
+require 'pry'
+binding.pry
