@@ -69,6 +69,7 @@ def supervised_as(name)
 end
 
 module Backup
+  extend Sudo
   module_function
 
   def path
@@ -88,6 +89,8 @@ module Backup
   end
 
   def write(gtid:)
+    sudo("touch #{path}")
+    sudo("chmod 666 #{path}")
     File.open(path, "wb") do |io|
       yield io
     end
