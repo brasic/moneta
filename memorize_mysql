@@ -227,6 +227,3 @@ if $PROGRAM_NAME == __FILE__
     USAGE
   end
 end
-
-require 'pry'
-binding.pry
