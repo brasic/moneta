@@ -9,6 +9,9 @@ require "ffi-xattr"
 require "base64"
 require "digest"
 
+
+
+
 MYSQL = "/var/lib/mysql"
 MTAB = "/etc/mtab"
 WD = "/var/lib"
