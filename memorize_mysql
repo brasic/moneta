@@ -56,6 +56,10 @@ def supervised_as(name)
       supervisor.start
     end
 
+
+
+
+
     def stop
       supervisor.stop
     end
