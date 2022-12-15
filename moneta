@@ -18,7 +18,7 @@ GTID_ATTR = "user.gtid"
 module Sudo
   def sudo(cmd, exception: true)
     puts "(sudo) -> #{cmd}"
-    system("sudo #{cmd}", exception:)
+    system("sudo #{cmd}", exception: exception)
   end
 end
 
@@ -88,7 +88,7 @@ module Backup
     sudo("touch #{path}")
     sudo("chmod 666 #{path}")
     File.open(path, "wb", &block)
-    set_attrs(gtid:)
+    set_attrs(gtid: gtid)
   end
 
   def attrs
